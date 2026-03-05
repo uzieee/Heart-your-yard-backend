@@ -169,6 +169,139 @@ export const getDiscoverCommunitiesService = async (
   }));
 };
 
+export type DiscoverSort = "newest" | "oldest" | "most_members" | "least_members";
+export type DiscoverTimeFilter = "all" | "last_week" | "last_month" | "last_3_months";
+
+export interface DiscoverCommunitiesPaginatedResult {
+  communities: (Community & { posts_count?: number; is_member?: boolean })[];
+  totalCount: number;
+  totalPages: number;
+  page: number;
+  limit: number;
+}
+
+/** Discover all communities with DB search, pagination (12 per page), sort and time filter. Includes is_member when userId provided. */
+export const getDiscoverCommunitiesPaginatedService = async (
+  options: {
+    search?: string;
+    page?: number;
+    limit?: number;
+    userId?: string;
+    sort?: DiscoverSort;
+    timeFilter?: DiscoverTimeFilter;
+  }
+): Promise<DiscoverCommunitiesPaginatedResult> => {
+  const search = options.search?.trim() || "";
+  const page = Math.max(1, options.page ?? 1);
+  const limit = Math.min(Math.max(1, options.limit ?? 12), 50);
+  const sort = options.sort ?? "newest";
+  const timeFilter = options.timeFilter ?? "all";
+  const offset = (page - 1) * limit;
+
+  let whereClause = "c.deleted_at IS NULL";
+  const bind: (string | number)[] = [];
+  let paramIndex = 1;
+
+  if (search) {
+    whereClause += ` AND (c.name ILIKE $${paramIndex} OR c.description ILIKE $${paramIndex})`;
+    bind.push(`%${search}%`);
+    paramIndex++;
+  }
+
+  if (timeFilter !== "all") {
+    const now = new Date();
+    let from: Date;
+    if (timeFilter === "last_week") {
+      from = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    } else if (timeFilter === "last_month") {
+      from = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+    } else {
+      from = new Date(now.getFullYear(), now.getMonth() - 3, now.getDate());
+    }
+    whereClause += ` AND c.created_at >= $${paramIndex}`;
+    bind.push(from.toISOString());
+    paramIndex++;
+  }
+
+  const orderBy =
+    sort === "oldest"
+      ? "c.created_at ASC"
+      : sort === "most_members"
+        ? "member_count DESC, c.created_at DESC"
+        : sort === "least_members"
+          ? "member_count ASC, c.created_at DESC"
+          : "c.created_at DESC";
+
+  const bindCount = [...bind];
+  const countResult = await sequelize.query(
+    `SELECT COUNT(*)::INTEGER as cnt
+     FROM communities c
+     WHERE ${whereClause}`,
+    { bind: bindCount, type: QueryTypes.SELECT }
+  ) as any[];
+  const totalCount = countResult[0]?.cnt ?? 0;
+  const totalPages = Math.ceil(totalCount / limit) || 1;
+
+  bind.push(limit, offset);
+  const limitParam = paramIndex;
+  const offsetParam = paramIndex + 1;
+
+  const rows = await sequelize.query(
+    `SELECT 
+       c.id,
+       c.name,
+       c.description,
+       c.image,
+       c.created_by,
+       c.created_at,
+       COALESCE(mc.cnt::INTEGER, 0) as member_count,
+       COALESCE(pc.cnt::INTEGER, 0) as posts_count
+     FROM communities c
+     LEFT JOIN (
+       SELECT community_id, COUNT(*) as cnt
+       FROM community_members
+       WHERE deleted_at IS NULL
+       GROUP BY community_id
+     ) mc ON mc.community_id = c.id
+     LEFT JOIN (
+       SELECT community_id, COUNT(*) as cnt
+       FROM community_posts
+       WHERE deleted_at IS NULL
+       GROUP BY community_id
+     ) pc ON pc.community_id = c.id
+     WHERE ${whereClause}
+     ORDER BY ${orderBy}
+     LIMIT $${limitParam} OFFSET $${offsetParam}`,
+    { bind, type: QueryTypes.SELECT }
+  ) as any[];
+
+  const communityIds = rows.map((r) => r.id);
+  let memberSet: Set<string> = new Set();
+  if (options.userId && communityIds.length > 0) {
+    const members = await sequelize.query(
+      `SELECT community_id FROM community_members
+       WHERE user_id = $1 AND deleted_at IS NULL
+       AND community_id IN (SELECT unnest($2::uuid[]))`,
+      { bind: [options.userId, communityIds], type: QueryTypes.SELECT }
+    ) as any[];
+    memberSet = new Set((members || []).map((m) => m.community_id));
+  }
+
+  const communities = rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    description: r.description,
+    image: r.image,
+    created_by: r.created_by,
+    member_count: r.member_count,
+    is_member: memberSet.has(r.id),
+    posts_count: r.posts_count ?? 0,
+    created_at: r.created_at,
+  }));
+
+  return { communities, totalCount, totalPages, page, limit };
+};
+
 export const getCommunityByIdService = async (
   communityId: string,
   userId?: string
@@ -355,6 +488,50 @@ export const joinCommunityService = async (
   await sequelize.query(
     `INSERT INTO community_members (community_id, user_id, role) VALUES ($1, $2, 'MEMBER')`,
     { bind: [communityId, userId], type: QueryTypes.INSERT }
+  );
+};
+
+export const addCommunityMemberService = async (
+  adminUserId: string,
+  communityId: string,
+  targetUserId: string
+): Promise<void> => {
+  const [adminMember] = await sequelize.query(
+    `SELECT role
+     FROM community_members
+     WHERE community_id = $1 AND user_id = $2 AND deleted_at IS NULL
+     LIMIT 1`,
+    { bind: [communityId, adminUserId], type: QueryTypes.SELECT }
+  ) as any[];
+  if (!adminMember || adminMember.role !== "ADMIN") {
+    throw { statusCode: 403, message: "Only community admins can add members" };
+  }
+
+  const [community] = await sequelize.query(
+    `SELECT id FROM communities WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+    { bind: [communityId], type: QueryTypes.SELECT }
+  ) as any[];
+  if (!community) throw { statusCode: 404, message: "Community not found" };
+
+  const [targetUser] = await sequelize.query(
+    `SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+    { bind: [targetUserId], type: QueryTypes.SELECT }
+  ) as any[];
+  if (!targetUser) throw { statusCode: 404, message: "User not found" };
+
+  const [existing] = await sequelize.query(
+    `SELECT id
+     FROM community_members
+     WHERE community_id = $1 AND user_id = $2 AND deleted_at IS NULL
+     LIMIT 1`,
+    { bind: [communityId, targetUserId], type: QueryTypes.SELECT }
+  ) as any[];
+  if (existing) throw { statusCode: 409, message: "User is already a member" };
+
+  await sequelize.query(
+    `INSERT INTO community_members (community_id, user_id, role)
+     VALUES ($1, $2, 'MEMBER')`,
+    { bind: [communityId, targetUserId], type: QueryTypes.INSERT }
   );
 };
 

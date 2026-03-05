@@ -6,11 +6,13 @@ import {
   followUserService,
   unfollowUserService,
   getFollowingsCountService,
-  getFollowedUsersService,
-  getFollowersService,
+  getFollowersCountService,
+  getFollowedUsersPaginatedService,
+  getFollowersPaginatedService,
   checkFollowStatusService,
+  isFriendService,
+  type FollowedUser,
 } from "@/services/followsService";
-import { sendFriendRequestService } from "@/services/friendRequestsService";
 
 const followUserSchema = z.object({
   followingId: z.string().uuid("Invalid user ID"),
@@ -44,11 +46,48 @@ export const followUser = async (
       return;
     }
 
-    // Send friend request instead of directly following
-    const result = await sendFriendRequestService(
-      req.user.userId,
-      parsed.data.followingId
-    );
+    // Directly follow user (one-way relationship, not friend request)
+    // ⚠️ CRITICAL: This should ONLY create entry in follows table, NOT in friend_requests table
+    // This endpoint is for one-way follow relationships only
+    // Friend requests should be handled by /api/friend-requests endpoint
+    console.log(`[followUser controller] ==========================================`);
+    console.log(`[followUser controller] FOLLOW REQUEST: ${req.user.userId} -> ${parsed.data.followingId}`);
+    console.log(`[followUser controller] ⚠️ CRITICAL: This should NOT create any friend_requests entry`);
+    console.log(`[followUser controller] ==========================================`);
+    
+    const result = await followUserService(req.user.userId, parsed.data.followingId);
+    
+    console.log(`[followUser controller] ==========================================`);
+    console.log(`[followUser controller] Follow service completed. Follow ID: ${result.followId}`);
+    
+    // FINAL VERIFICATION: Check if friend request was created (should NOT happen)
+    try {
+      const sequelize = (await import("database")).default;
+      const { QueryTypes } = await import("sequelize");
+      const [verifyFriendRequest] = await sequelize.query(
+        `SELECT id, requester_id, receiver_id, status, created_at 
+         FROM friend_requests 
+         WHERE ((requester_id = $1 AND receiver_id = $2) OR (requester_id = $2 AND receiver_id = $1))
+         AND deleted_at IS NULL 
+         AND created_at > NOW() - INTERVAL '10 seconds'
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        { bind: [req.user.userId, parsed.data.followingId], type: QueryTypes.SELECT }
+      ) as any[];
+      
+      if (verifyFriendRequest && verifyFriendRequest.length > 0) {
+        console.error(`[followUser controller] ❌❌❌ CRITICAL ERROR DETECTED! ❌❌❌`);
+        console.error(`[followUser controller] Friend request was created when it should NOT have been!`);
+        console.error(`[followUser controller] Friend request details:`, JSON.stringify(verifyFriendRequest, null, 2));
+        console.error(`[followUser controller] This indicates a DATABASE TRIGGER or other automatic mechanism!`);
+        console.error(`[followUser controller] Please check database triggers using check-and-remove-triggers.sql`);
+      } else {
+        console.log(`[followUser controller] ✅ Final verification: No friend request created (correct)`);
+      }
+    } catch (verifyError) {
+      console.error(`[followUser controller] Error during verification:`, verifyError);
+    }
+    console.log(`[followUser controller] ==========================================`);
 
     // Create notification for receiver
     try {
@@ -57,7 +96,7 @@ export const followUser = async (
         userId: parsed.data.followingId,
         actorId: req.user.userId,
         type: "USER_FOLLOWED",
-        referenceId: result.requestId,
+        referenceId: result.followId,
         referenceType: "USER",
       });
 
@@ -66,56 +105,19 @@ export const followUser = async (
         const socketModule = await import("@/index");
         const socketService = socketModule.socketService;
         if (socketService) {
-          // Get requester info for the socket event
-          const { QueryTypes } = await import("sequelize");
-          const sequelize = (await import("database")).default;
-          const [requesterInfo] = await sequelize.query(
-            `SELECT 
-              u.id,
-              u.username,
-              COALESCE(o.image, u.image) as image,
-              COALESCE(u.is_verified_email, false) as is_verified
-            FROM users u
-            LEFT JOIN onboarding o ON u.id = o.user_id AND o.deleted_at IS NULL
-            WHERE u.id = $1 AND u.deleted_at IS NULL
-            LIMIT 1`,
-            { bind: [req.user.userId], type: QueryTypes.SELECT }
-          ) as any[];
-
+          // Emit notification event (for notification dropdown)
           socketService.emitNotification(parsed.data.followingId, {
             type: "new-notification",
           });
-
-          // Emit friend request event with complete data
-          if (requesterInfo) {
-            socketService.emitFriendRequest(parsed.data.followingId, {
-              type: "friend-request-received",
-              request: {
-                id: result.requestId,
-                requester_id: req.user.userId,
-                receiver_id: parsed.data.followingId,
-                status: "PENDING",
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString(),
-                requester: {
-                  id: requesterInfo.id,
-                  username: requesterInfo.username,
-                  image: requesterInfo.image,
-                  is_verified: requesterInfo.is_verified,
-                },
-              },
-            });
-            console.log(`📤 Emitted friend request to user ${parsed.data.followingId} via socket`);
-          }
         }
       } catch (socketError) {
         console.error("Error emitting notification socket:", socketError);
       }
     } catch (notifError) {
-      console.error("Error creating friend request notification:", notifError);
+      console.error("Error creating follow notification:", notifError);
     }
 
-    sendSuccess(res, 200, "Friend request sent successfully", result);
+    sendSuccess(res, 200, "User followed successfully", result);
   } catch (error: unknown) {
     const err = error as { statusCode?: number; message?: string };
     if (err.statusCode) {
@@ -123,6 +125,47 @@ export const followUser = async (
       return;
     }
     console.error("Follow user error:", error);
+    sendError(res, 500, "Internal server error");
+  }
+};
+
+export const removeFollower = async (
+  req: AuthRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      sendError(res, 401, "Authentication required");
+      return;
+    }
+
+    const followerId = req.params.followerId;
+    if (!followerId) {
+      sendError(res, 400, "Follower ID is required");
+      return;
+    }
+
+    // Remove the follow: they follow me → delete that follow row
+    await unfollowUserService(followerId, req.user.userId);
+
+    try {
+      const socketModule = await import("@/index");
+      const socketService = socketModule.socketService;
+      if (socketService) {
+        socketService.emitFollowersFollowingUpdate([req.user.userId, followerId]);
+      }
+    } catch (socketError) {
+      console.error("Error emitting followers-following update:", socketError);
+    }
+
+    sendSuccess(res, 200, "Follower removed successfully");
+  } catch (error: unknown) {
+    const err = error as { statusCode?: number; message?: string };
+    if (err.statusCode) {
+      sendError(res, err.statusCode, err.message || "Something went wrong");
+      return;
+    }
+    console.error("Remove follower error:", error);
     sendError(res, 500, "Internal server error");
   }
 };
@@ -144,6 +187,16 @@ export const unfollowUser = async (
     }
 
     await unfollowUserService(req.user.userId, followingId);
+
+    try {
+      const socketModule = await import("@/index");
+      const socketService = socketModule.socketService;
+      if (socketService) {
+        socketService.emitFollowersFollowingUpdate([req.user.userId, followingId]);
+      }
+    } catch (socketError) {
+      console.error("Error emitting followers-following update:", socketError);
+    }
 
     sendSuccess(res, 200, "User unfollowed successfully");
   } catch (error: unknown) {
@@ -167,10 +220,15 @@ export const getFollowingsCount = async (
       return;
     }
 
-    const count = await getFollowingsCountService(req.user.userId);
+    const [followingCount, followersCount] = await Promise.all([
+      getFollowingsCountService(req.user.userId),
+      getFollowersCountService(req.user.userId),
+    ]);
 
-    sendSuccess(res, 200, "Followings count fetched successfully", {
-      count,
+    sendSuccess(res, 200, "Follow counts fetched successfully", {
+      count: followingCount,
+      followingCount,
+      followersCount,
     });
   } catch (error: unknown) {
     const err = error as { statusCode?: number; message?: string };
@@ -193,11 +251,23 @@ export const getFollowedUsers = async (
       return;
     }
 
-    const users = await getFollowedUsersService(req.user.userId);
-
-    sendSuccess(res, 200, "Followed users fetched successfully", {
+    const limit = Math.min(parseInt(String(req.query.limit || "10"), 10) || 10, 50);
+    const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+    const search = typeof req.query.search === "string" ? req.query.search : typeof req.query.q === "string" ? req.query.q : undefined;
+    const result = await getFollowedUsersPaginatedService(req.user.userId, limit, cursor, search);
+    const users = (result.users || []).map((u: FollowedUser) => ({
+      id: u.id,
+      username: u.username,
+      image: u.image ?? "",
+      is_verified: u.is_verified,
+      followed_at: u.followed_at ?? null,
+    }));
+    const data = {
       users,
-    });
+      nextCursor: result.nextCursor ?? null,
+      hasMore: result.hasMore === true,
+    };
+    sendSuccess(res, 200, "Followed users fetched successfully", data);
   } catch (error: unknown) {
     const err = error as { statusCode?: number; message?: string };
     if (err.statusCode) {
@@ -209,7 +279,7 @@ export const getFollowedUsers = async (
   }
 };
 
-/** GET my followers (who follows me). Use this for the "follower screen" - initially shows only users who already follow you. */
+/** GET my followers (who follows me). Cursor-based pagination for infinite scroll. */
 export const getFollowers = async (
   req: AuthRequest,
   res: Response
@@ -220,12 +290,23 @@ export const getFollowers = async (
       return;
     }
 
-    const limit = Math.min(parseInt(String(req.query.limit || "10"), 10) || 10, 100);
-    const users = await getFollowersService(req.user.userId, limit);
-
-    sendSuccess(res, 200, "Followers fetched successfully", {
+    const limit = Math.min(parseInt(String(req.query.limit || "10"), 10) || 10, 50);
+    const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+    const search = typeof req.query.search === "string" ? req.query.search : typeof req.query.q === "string" ? req.query.q : undefined;
+    const result = await getFollowersPaginatedService(req.user.userId, limit, cursor, search);
+    const users = (result.users || []).map((u: FollowedUser) => ({
+      id: u.id,
+      username: u.username,
+      image: u.image ?? "",
+      is_verified: u.is_verified,
+      followed_at: u.followed_at ?? null,
+    }));
+    const data = {
       users,
-    });
+      nextCursor: result.nextCursor ?? null,
+      hasMore: result.hasMore === true,
+    };
+    sendSuccess(res, 200, "Followers fetched successfully", data);
   } catch (error: unknown) {
     const err = error as { statusCode?: number; message?: string };
     if (err.statusCode) {
@@ -275,6 +356,36 @@ export const checkFollowStatus = async (
       return;
     }
     console.error("Check follow status error:", error);
+    sendError(res, 500, "Internal server error");
+  }
+};
+
+export const checkIsFriend = async (
+  req: AuthRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      sendError(res, 401, "Authentication required");
+      return;
+    }
+
+    const targetUserId = req.params.userId;
+    if (!targetUserId) {
+      sendError(res, 400, "User ID is required");
+      return;
+    }
+
+    const isFriend = await isFriendService(req.user.userId, targetUserId);
+
+    sendSuccess(res, 200, "Friend status checked", { isFriend });
+  } catch (error: unknown) {
+    const err = error as { statusCode?: number; message?: string };
+    if (err.statusCode) {
+      sendError(res, err.statusCode, err.message || "Something went wrong");
+      return;
+    }
+    console.error("Check is friend error:", error);
     sendError(res, 500, "Internal server error");
   }
 };

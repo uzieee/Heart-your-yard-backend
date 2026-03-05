@@ -10,6 +10,12 @@ import notificationsRouter from "@/routes/notifications.routes";
 import friendRequestsRouter from "@/routes/friendRequests.routes";
 import messagesRouter from "@/routes/messages.routes";
 import communitiesRouter from "@/routes/communities.routes";
+import plantingTasksRouter from "@/routes/plantingTasks.routes";
+import mapRouter from "@/routes/map.routes";
+import tagsRouter from "@/routes/tags.routes";
+import communityMessagesRouter from "@/routes/communityMessages.routes";
+import messageGroupsRouter from "@/routes/messageGroups.routes";
+import adminRouter from "@/routes/admin.routes";
 
 const router = Router();
 
@@ -24,6 +30,12 @@ router.use("/notifications", notificationsRouter);
 router.use("/friend-requests", friendRequestsRouter);
 router.use("/messages", messagesRouter);
 router.use("/communities", communitiesRouter);
+router.use("/planting-tasks", plantingTasksRouter);
+router.use("/map", mapRouter);
+router.use("/tags", tagsRouter);
+router.use("/community-messages", communityMessagesRouter);
+router.use("/message-groups", messageGroupsRouter);
+router.use("/admin", adminRouter);
 
 export default router;
 

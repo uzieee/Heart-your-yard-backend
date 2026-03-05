@@ -1,5 +1,6 @@
 import { QueryTypes } from "sequelize";
 import sequelize from "database";
+import { getPostTagsByPostIds, syncPostTags, type PostTag } from "@/services/tagsService";
 
 export interface PostMedia {
   id: string;
@@ -26,6 +27,7 @@ export interface Post {
     is_verified: boolean;
   };
   media: PostMedia[];
+  tags: PostTag[];
   likes_count: number;
   dislikes_count: number;
   comments_count: number;
@@ -54,7 +56,14 @@ export interface CreatePostPayload {
 export const createPostService = async (
   payload: CreatePostPayload
 ): Promise<Post> => {
-  const { userId, description, location, locationCoordinates, plantingScheduleDate, media = [] } = payload;
+  const {
+    userId,
+    description,
+    location,
+    locationCoordinates,
+    plantingScheduleDate,
+    media = [],
+  } = payload;
 
   // Start transaction
   const transaction = await sequelize.transaction();
@@ -99,6 +108,8 @@ export const createPostService = async (
         );
       }
     }
+
+    await syncPostTags(postId, description || null, transaction);
 
     // Commit transaction
     await transaction.commit();
@@ -180,6 +191,8 @@ export const getPostByIdService = async (
     }
   );
 
+  const tagsMap = await getPostTagsByPostIds([postId]);
+
   return {
     id: postData.id,
     user_id: postData.user_id,
@@ -201,6 +214,7 @@ export const getPostByIdService = async (
       is_verified: postData.is_verified,
     },
     media: mediaResult as PostMedia[],
+    tags: tagsMap.get(postId) || [],
     likes_count: postData.likes_count || 0,
     dislikes_count: postData.dislikes_count || 0,
     comments_count: postData.comments_count || 0,
@@ -212,12 +226,43 @@ export const getPostByIdService = async (
 export const getPostsService = async (
   currentUserId: string,
   cursor?: string,
-  limit: number = 10
+  limit: number = 10,
+  authorUserId?: string,
+  search?: string | null
 ): Promise<PostsResponse> => {
   const limitValue = Math.min(limit, 50); // Max 50 per page
   const offset = cursor ? parseInt(cursor) : 0;
 
-  // Get all posts from all users (public feed) - image always comes from onboarding table
+  const conditions: string[] = ["p.deleted_at IS NULL"];
+  const bindParams: (string | number)[] = [currentUserId, limitValue, offset];
+  let paramIndex = 4;
+  if (authorUserId) {
+    conditions.push(`p.user_id = $${paramIndex}`);
+    bindParams.push(authorUserId);
+    paramIndex++;
+  }
+  if (search && search.trim()) {
+    conditions.push(`(
+      p.description ILIKE $${paramIndex}
+      OR EXISTS (
+        SELECT 1
+        FROM post_tags pt
+        INNER JOIN tags t ON t.id = pt.tag_id
+        WHERE pt.post_id = p.id
+          AND pt.deleted_at IS NULL
+          AND t.deleted_at IS NULL
+          AND t.name ILIKE $${paramIndex + 1}
+      )
+    )`);
+    bindParams.push(`%${search.trim()}%`);
+    const normalizedTag = search.trim().replace(/^#/, "");
+    bindParams.push(`%${normalizedTag}%`);
+    paramIndex++;
+    paramIndex++;
+  }
+  const whereClause = "WHERE " + conditions.join(" AND ");
+
+  // Get posts (all users or single user when authorUserId provided)
   const postsResult = await sequelize.query(
     `SELECT 
        p.id,
@@ -260,11 +305,11 @@ export const getPostsService = async (
        GROUP BY post_id
      ) c ON p.id = c.post_id
      LEFT JOIN post_likes pl ON p.id = pl.post_id AND pl.user_id = $1 AND pl.deleted_at IS NULL
-     WHERE p.deleted_at IS NULL
+     ${whereClause}
      ORDER BY p.created_at DESC
      LIMIT $2 OFFSET $3`,
     {
-      bind: [currentUserId, limitValue, offset],
+      bind: bindParams,
       type: QueryTypes.SELECT,
     }
   );
@@ -296,6 +341,8 @@ export const getPostsService = async (
     });
   }
 
+  const tagsMap = await getPostTagsByPostIds(postIds);
+
   // Format posts
   const formattedPosts: Post[] = posts.map((postData) => ({
     id: postData.id,
@@ -318,6 +365,7 @@ export const getPostsService = async (
       is_verified: postData.is_verified,
     },
     media: mediaMap.get(postData.id) || [],
+    tags: tagsMap.get(postData.id) || [],
     likes_count: postData.likes_count || 0,
     dislikes_count: postData.dislikes_count || 0,
     comments_count: postData.comments_count || 0,

@@ -6,6 +6,7 @@ import {
   declineFriendRequest,
   getFriendRequests,
   getSentFriendRequestsCount,
+  getSentFriendRequests,
   getFriends,
 } from "@/controllers/friendRequests";
 
@@ -16,6 +17,7 @@ friendRequestsRouter.use(authenticateToken); // All routes require authenticatio
 friendRequestsRouter.post("/", sendFriendRequest);
 friendRequestsRouter.get("/", getFriendRequests);
 friendRequestsRouter.get("/friends", getFriends);
+friendRequestsRouter.get("/sent", getSentFriendRequests);
 friendRequestsRouter.get("/sent/count", getSentFriendRequestsCount);
 friendRequestsRouter.post("/:requestId/accept", acceptFriendRequest);
 friendRequestsRouter.post("/:requestId/decline", declineFriendRequest);

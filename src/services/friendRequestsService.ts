@@ -38,7 +38,7 @@ export const sendFriendRequestService = async (
 
   // Check if there's already a pending request (either direction)
   const [existingRequest] = await sequelize.query(
-    `SELECT id, status FROM friend_requests 
+    `SELECT id, status, requester_id, receiver_id FROM friend_requests 
      WHERE ((requester_id = $1 AND receiver_id = $2) OR (requester_id = $2 AND receiver_id = $1))
      AND deleted_at IS NULL 
      LIMIT 1`,
@@ -46,11 +46,62 @@ export const sendFriendRequestService = async (
   ) as any[];
 
   if (existingRequest) {
-    if (existingRequest.status === "PENDING") {
-      throw { statusCode: 409, message: "Friend request already exists" };
-    }
     if (existingRequest.status === "ACCEPTED") {
       throw { statusCode: 409, message: "Already friends with this user" };
+    }
+    
+    // MUTUAL REQUEST HANDLING: If opposite direction request exists and is PENDING, auto-accept it
+    if (existingRequest.status === "PENDING") {
+      // Check if this is the opposite direction (receiver sent us a request)
+      if (existingRequest.requester_id === receiverId && existingRequest.receiver_id === requesterId) {
+        console.log(`✅ Mutual friend request detected! Auto-accepting existing request from ${receiverId}`);
+        
+        // Auto-accept the existing request (like social media apps do)
+        await sequelize.query(
+          `UPDATE friend_requests 
+           SET status = 'ACCEPTED', updated_at = NOW()
+           WHERE id = $1 AND deleted_at IS NULL`,
+          { bind: [existingRequest.id], type: QueryTypes.UPDATE }
+        );
+
+        // Create bidirectional friendship in follows table
+        const [existingFollow1] = await sequelize.query(
+          `SELECT id FROM follows 
+           WHERE follower_id = $1 AND following_id = $2 AND deleted_at IS NULL 
+           LIMIT 1`,
+          { bind: [requesterId, receiverId], type: QueryTypes.SELECT }
+        ) as any[];
+
+        const [existingFollow2] = await sequelize.query(
+          `SELECT id FROM follows 
+           WHERE follower_id = $1 AND following_id = $2 AND deleted_at IS NULL 
+           LIMIT 1`,
+          { bind: [receiverId, requesterId], type: QueryTypes.SELECT }
+        ) as any[];
+
+        // Create bidirectional follows if they don't exist
+        if (!existingFollow1) {
+          await sequelize.query(
+            `INSERT INTO follows (follower_id, following_id) VALUES ($1, $2)`,
+            { bind: [requesterId, receiverId], type: QueryTypes.INSERT }
+          );
+        }
+        if (!existingFollow2) {
+          await sequelize.query(
+            `INSERT INTO follows (follower_id, following_id) VALUES ($1, $2)`,
+            { bind: [receiverId, requesterId], type: QueryTypes.INSERT }
+          );
+        }
+
+        return {
+          requestId: existingRequest.id,
+          message: "Friend request accepted automatically! You are now friends.",
+          autoAccepted: true,
+        };
+      } else {
+        // Same direction request already exists
+        throw { statusCode: 409, message: "Friend request already sent" };
+      }
     }
     // If declined, allow sending a new request
   }
@@ -203,6 +254,77 @@ export const getSentFriendRequestsCountService = async (
   return parseInt(result?.count || "0", 10);
 };
 
+export const getSentFriendRequestsService = async (
+  userId: string,
+  limit: number = 100,
+  cursor?: string
+): Promise<{ requests: FriendRequest[]; nextCursor?: string; hasMore: boolean }> => {
+  let query = `
+    SELECT 
+      fr.id,
+      fr.requester_id,
+      fr.receiver_id,
+      fr.status,
+      fr.created_at,
+      fr.updated_at,
+      u.id as receiver_user_id,
+      u.username as receiver_username,
+      COALESCE(o.image, u.image) as receiver_image,
+      COALESCE(u.is_verified_email, false) as receiver_is_verified
+    FROM friend_requests fr
+    INNER JOIN users u ON fr.receiver_id = u.id
+    LEFT JOIN onboarding o ON u.id = o.user_id AND o.deleted_at IS NULL
+    WHERE fr.requester_id = $1 
+      AND fr.status = 'PENDING' 
+      AND fr.deleted_at IS NULL 
+      AND u.deleted_at IS NULL
+  `;
+
+  const bindParams: any[] = [userId];
+
+  if (cursor) {
+    query += ` AND fr.created_at < $2`;
+    bindParams.push(cursor);
+  }
+
+  query += ` ORDER BY fr.created_at DESC LIMIT $${bindParams.length + 1}`;
+  bindParams.push(limit + 1); // Fetch one extra to check if there's more
+
+  const requests = await sequelize.query(query, {
+    bind: bindParams,
+    type: QueryTypes.SELECT,
+  }) as any[];
+
+  const hasMore = requests.length > limit;
+  const requestsToReturn = hasMore ? requests.slice(0, limit) : requests;
+
+  const nextCursor = hasMore && requestsToReturn.length > 0
+    ? requestsToReturn[requestsToReturn.length - 1].created_at.toISOString()
+    : undefined;
+
+  const formattedRequests: FriendRequest[] = requestsToReturn.map((req: any) => ({
+    id: req.id,
+    requester_id: req.requester_id, // Current user (we sent the request)
+    receiver_id: req.receiver_id, // The user we sent request to
+    status: req.status,
+    created_at: req.created_at,
+    updated_at: req.updated_at,
+    requester: {
+      // In sent requests, requester field shows the receiver (who we sent request to)
+      id: req.receiver_user_id,
+      username: req.receiver_username,
+      image: req.receiver_image,
+      is_verified: req.receiver_is_verified,
+    },
+  }));
+
+  return {
+    requests: formattedRequests,
+    nextCursor,
+    hasMore,
+  };
+};
+
 export const getFriendRequestsService = async (
   userId: string,
   limit: number = 10,
@@ -281,6 +403,8 @@ export interface Friend {
   lastMessage?: string;
   lastSeen?: string;
   isOnline?: boolean;
+  /** When the friend request was accepted (became friends). ISO date string. */
+  friend_since?: string;
 }
 
 export const getFriendsService = async (
@@ -384,6 +508,9 @@ export const getFriendsService = async (
       is_verified: friend.is_verified,
       isOnline: onlineUserIds ? onlineUserIds.includes(friend.id) : false,
       lastMessage,
+      friend_since: friend.friendship_updated_at
+        ? new Date(friend.friendship_updated_at).toISOString()
+        : undefined,
     };
   });
 

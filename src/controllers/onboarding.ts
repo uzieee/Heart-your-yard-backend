@@ -25,6 +25,8 @@ const onboardingSchema = z.object({
   sharingPreference: z.string().optional().nullable(),
   safetyDeclaration: z.boolean().optional().nullable(),
   image: z.string().optional().nullable(),
+  gender: z.string().optional().nullable(),
+  phone: z.string().optional().nullable(),
 });
 
 export const saveOnboarding = async (

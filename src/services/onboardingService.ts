@@ -1,6 +1,7 @@
 import { QueryTypes } from "sequelize";
 import sequelize from "database";
 import { generateToken } from "@/utils/jwt";
+import { addUserImage } from "@/services/userImagesService";
 
 export interface OnboardingBody {
   userId: string;
@@ -17,6 +18,8 @@ export interface OnboardingBody {
   sharingPreference?: string | null;
   safetyDeclaration?: boolean | null;
   image?: string | null;
+  gender?: string | null;
+  phone?: string | null;
 }
 
 interface OnboardingRecord {
@@ -58,6 +61,8 @@ export const createOrUpdateOnboarding = async (
     sharingPreference,
     safetyDeclaration,
     image,
+    gender,
+    phone,
   } = body;
 
   // Check if onboarding already exists
@@ -118,6 +123,14 @@ export const createOrUpdateOnboarding = async (
       updateFields.push(`image = $${paramCount++}`);
       values.push(image || null);
     }
+    if (gender !== undefined) {
+      updateFields.push(`gender = $${paramCount++}`);
+      values.push(gender || null);
+    }
+    if (phone !== undefined) {
+      updateFields.push(`phone = $${paramCount++}`);
+      values.push(phone || null);
+    }
 
     if (updateFields.length === 0) {
       // No fields to update, return existing
@@ -160,9 +173,9 @@ export const createOrUpdateOnboarding = async (
       `INSERT INTO onboarding (
         user_id, date_of_birth, address, pin_location, garden_type,
         experience_level, garden_space, plants_maintain, sharing_preference,
-        safety_declaration, image
+        safety_declaration, image, gender, phone
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       RETURNING *`,
       {
         bind: [
@@ -177,6 +190,8 @@ export const createOrUpdateOnboarding = async (
           sharingPreference || null,
           safetyDeclaration || null,
           image || null,
+          gender || null,
+          phone || null,
         ],
         type: QueryTypes.SELECT,
       }
@@ -197,6 +212,26 @@ export const createOrUpdateOnboarding = async (
 };
 
 export const completeOnboarding = async (userId: string) => {
+  // Get onboarding data to check for image
+  const onboardingResult = await sequelize.query(
+    `SELECT image FROM onboarding WHERE user_id = $1 AND deleted_at IS NULL LIMIT 1`,
+    { bind: [userId], type: QueryTypes.SELECT }
+  );
+
+  const onboarding = Array.isArray(onboardingResult) && onboardingResult.length > 0
+    ? (onboardingResult[0] as { image: string | null })
+    : null;
+
+  // If onboarding has an image, save it to user_images table as profile with is_primary = true
+  if (onboarding?.image) {
+    try {
+      await addUserImage(userId, "profile", onboarding.image, true);
+    } catch (error) {
+      // Log error but don't fail onboarding completion if image save fails
+      console.error("Failed to save onboarding image to user_images:", error);
+    }
+  }
+
   // Update user's is_onboarded flag
   await sequelize.query(
     `UPDATE users SET is_onboarded = true WHERE id = $1`,

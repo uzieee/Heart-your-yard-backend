@@ -3,6 +3,7 @@ import sequelize from "database";
 import Message from "@/models/Message";
 import MessageMedia from "@/models/MessageMedia";
 import MessageRead from "@/models/MessageRead";
+import { assertPremiumUser } from "@/services/subscriptionService";
 
 export interface MessageWithMedia {
   id: string;
@@ -58,6 +59,7 @@ export const sendMessageService = async (
   senderId: string,
   payload: SendMessagePayload
 ): Promise<MessageWithMedia> => {
+  await assertPremiumUser(senderId);
   // Verify that sender and receiver are friends
   const [friendship] = await sequelize.query(
     `SELECT id FROM friend_requests 
@@ -184,6 +186,7 @@ export const getMessagesService = async (
   limit: number = 20,
   cursor?: string
 ): Promise<MessagesResponse> => {
+  await assertPremiumUser(currentUserId);
   // Verify friendship
   const [friendship] = await sequelize.query(
     `SELECT id FROM friend_requests 
@@ -314,6 +317,7 @@ export const markMessagesAsReadService = async (
   currentUserId: string,
   otherUserId: string
 ): Promise<{ count: number }> => {
+  await assertPremiumUser(currentUserId);
   // Get all unread messages from otherUserId to currentUserId
   const unreadMessages = await sequelize.query(
     `SELECT m.id 
@@ -351,6 +355,7 @@ export const getUnreadCountService = async (
   currentUserId: string,
   otherUserId: string
 ): Promise<{ count: number }> => {
+  await assertPremiumUser(currentUserId);
   const [result] = await sequelize.query(
     `SELECT COUNT(*) as count
      FROM messages m
@@ -371,6 +376,7 @@ export const getUnreadCountService = async (
 export const getAllUnreadCountsService = async (
   currentUserId: string
 ): Promise<Record<string, number>> => {
+  await assertPremiumUser(currentUserId);
   const results = await sequelize.query(
     `SELECT 
        m.sender_id as other_user_id,

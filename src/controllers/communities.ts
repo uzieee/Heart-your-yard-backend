@@ -6,13 +6,16 @@ import {
   createCommunityService,
   getMyCommunitiesService,
   getDiscoverCommunitiesService,
+  getDiscoverCommunitiesPaginatedService,
   getCommunityByIdService,
   getCommunityMembersService,
   joinCommunityService,
+  addCommunityMemberService,
   leaveCommunityService,
   updateCommunityService,
   deleteCommunityService,
 } from "@/services/communitiesService";
+import type { DiscoverSort, DiscoverTimeFilter } from "@/services/communitiesService";
 
 const createCommunitySchema = z.object({
   name: z.string().min(1, "Name is required").max(255),
@@ -101,6 +104,9 @@ export const getMyCommunities = async (
   }
 };
 
+const DISCOVER_SORT_VALUES: DiscoverSort[] = ["newest", "oldest", "most_members", "least_members"];
+const DISCOVER_TIME_VALUES: DiscoverTimeFilter[] = ["all", "last_week", "last_month", "last_3_months"];
+
 export const getDiscoverCommunities = async (
   req: AuthRequest,
   res: Response
@@ -108,20 +114,26 @@ export const getDiscoverCommunities = async (
   try {
     const search = typeof req.query.search === "string" ? req.query.search : "";
     const limit = Math.min(
-      parseInt(String(req.query.limit || "20"), 10) || 20,
+      parseInt(String(req.query.limit || "12"), 10) || 12,
       50
     );
+    const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
+    const sortParam = typeof req.query.sort === "string" ? req.query.sort : "newest";
+    const timeParam = typeof req.query.timeFilter === "string" ? req.query.timeFilter : "all";
+    const sort: DiscoverSort = DISCOVER_SORT_VALUES.includes(sortParam as DiscoverSort) ? sortParam as DiscoverSort : "newest";
+    const timeFilter: DiscoverTimeFilter = DISCOVER_TIME_VALUES.includes(timeParam as DiscoverTimeFilter) ? timeParam as DiscoverTimeFilter : "all";
     const userId = req.user?.userId;
 
-    const communities = await getDiscoverCommunitiesService({
+    const result = await getDiscoverCommunitiesPaginatedService({
       search: search || undefined,
+      page,
       limit,
       userId,
+      sort,
+      timeFilter,
     });
 
-    sendSuccess(res, 200, "Communities fetched successfully", {
-      communities,
-    });
+    sendSuccess(res, 200, "Communities fetched successfully", result);
   } catch (error: unknown) {
     const err = error as { statusCode?: number; message?: string };
     if (err.statusCode) {
@@ -283,6 +295,10 @@ export const joinCommunity = async (
           type: "member_joined",
           communityId,
         });
+        socketService.broadcastCommunityUpdate({
+          type: "member_joined",
+          communityId,
+        });
       }
     } catch (socketErr) {
       console.error("Error emitting community join socket:", socketErr);
@@ -326,6 +342,10 @@ export const leaveCommunity = async (
           type: "member_left",
           communityId,
         });
+        socketService.broadcastCommunityUpdate({
+          type: "member_left",
+          communityId,
+        });
       }
     } catch (socketErr) {
       console.error("Error emitting community leave socket:", socketErr);
@@ -339,6 +359,68 @@ export const leaveCommunity = async (
       return;
     }
     console.error("Leave community error:", error);
+    sendError(res, 500, "Internal server error");
+  }
+};
+
+const addCommunityMemberSchema = z.object({
+  userId: z.string().uuid("Valid userId is required"),
+});
+
+export const addCommunityMember = async (
+  req: AuthRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      sendError(res, 401, "Authentication required");
+      return;
+    }
+    const { communityId } = req.params;
+    if (!communityId) {
+      sendError(res, 400, "Community ID is required");
+      return;
+    }
+
+    const parsed = addCommunityMemberSchema.safeParse(req.body);
+    if (!parsed.success) {
+      const fieldErrors: Record<string, string[]> = {};
+      parsed.error.errors.forEach((err) => {
+        const key = err.path.join(".");
+        if (!fieldErrors[key]) fieldErrors[key] = [];
+        fieldErrors[key].push(err.message);
+      });
+      sendError(res, 422, "Validation failed", fieldErrors);
+      return;
+    }
+
+    await addCommunityMemberService(req.user.userId, communityId, parsed.data.userId);
+
+    try {
+      const socketModule = await import("@/index");
+      const socketService = socketModule.socketService;
+      if (socketService) {
+        socketService.emitCommunityUpdate(communityId, {
+          type: "member_joined",
+          communityId,
+        });
+        socketService.broadcastCommunityUpdate({
+          type: "member_joined",
+          communityId,
+        });
+      }
+    } catch (socketErr) {
+      console.error("Error emitting community add-member socket:", socketErr);
+    }
+
+    sendSuccess(res, 200, "Member added successfully");
+  } catch (error: unknown) {
+    const err = error as { statusCode?: number; message?: string };
+    if (err.statusCode) {
+      sendError(res, err.statusCode, err.message || "Something went wrong");
+      return;
+    }
+    console.error("Add community member error:", error);
     sendError(res, 500, "Internal server error");
   }
 };

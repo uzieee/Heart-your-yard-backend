@@ -217,6 +217,18 @@ class SocketService {
           socket.leave(`community-${data.communityId}`);
         }
       });
+
+      socket.on("subscribe-message-group", (data: { groupId: string }) => {
+        if (data?.groupId) {
+          socket.join(`message-group-${data.groupId}`);
+        }
+      });
+
+      socket.on("unsubscribe-message-group", (data: { groupId: string }) => {
+        if (data?.groupId) {
+          socket.leave(`message-group-${data.groupId}`);
+        }
+      });
     });
   }
 
@@ -259,6 +271,23 @@ class SocketService {
       console.log(`✅ Feed update broadcasted to ${totalSockets} connected socket(s)`);
     } else {
       console.warn(`⚠️ No connected sockets to broadcast to`);
+    }
+  }
+
+  public broadcastPlantingTasksUpdate(data: {
+    type: string;
+    task?: any;
+    taskIds?: string[];
+    changedCount?: number;
+  }) {
+    const totalSockets = this.io.sockets.sockets.size;
+    if (totalSockets > 0) {
+      this.io.emit("planting-tasks-updated", data);
+      console.log(`📢 planting-tasks-updated broadcast to ${totalSockets} socket(s)`, {
+        type: data.type,
+        taskId: data.task?.id,
+        changedCount: data.changedCount,
+      });
     }
   }
 
@@ -307,12 +336,36 @@ class SocketService {
     console.log(`📢 Community update emitted to room ${room} (${roomSize} listener(s)):`, data.type);
   }
 
+  // Broadcast community join/leave to all clients so search, sidebar, etc. can refetch
+  public broadcastCommunityUpdate(data: { type: "member_joined" | "member_left"; communityId: string }) {
+    const total = this.io.sockets.sockets.size;
+    if (total > 0) {
+      this.io.emit("community-update", data);
+      console.log(`📢 community-update broadcast to ${total} socket(s):`, data.type);
+    }
+  }
+
   // Emit when a new post is created in a community so members see it at runtime
   public emitCommunityPostCreated(communityId: string) {
     const room = `community-${communityId}`;
     this.io.to(room).emit("community-post-created", { communityId });
     const roomSize = this.io.sockets.adapter.rooms.get(room)?.size ?? 0;
     console.log(`📢 community-post-created emitted to room ${room} (${roomSize})`);
+  }
+
+  // Emit when a new message is sent in a community chat.
+  public emitCommunityMessage(communityId: string, message: any) {
+    const room = `community-${communityId}`;
+    const payload = { communityId, message };
+    this.io.to(room).emit("community-message", payload);
+    this.io.emit("community-message", payload);
+  }
+
+  public emitMessageGroupMessage(groupId: string, message: any) {
+    const room = `message-group-${groupId}`;
+    const payload = { groupId, message };
+    this.io.to(room).emit("message-group-message", payload);
+    this.io.emit("message-group-message", payload);
   }
 
   // Emit when like/dislike on a community post so other members see updated counts
@@ -345,6 +398,21 @@ class SocketService {
     this.io.emit("community-updated", { communityId });
     const roomSize = this.io.sockets.adapter.rooms.get(room)?.size ?? 0;
     console.log(`📢 community-updated emitted to room ${room} (${roomSize}) and broadcast`);
+  }
+
+  // Notify specific users that their followers/following lists changed (e.g. after accept friend request)
+  public emitFollowersFollowingUpdate(userIds: string[]) {
+    const payload = { type: "followers-following-updated" as const };
+    userIds.forEach((userId) => {
+      const socketId = this.onlineUsers.get(userId);
+      if (socketId) {
+        this.io.to(socketId).emit("followers-following-updated", payload);
+        console.log(`📢 followers-following-updated emitted to user ${userId}`);
+      }
+    });
+    if (userIds.length > 0) {
+      this.io.emit("followers-following-updated", { ...payload, userIds });
+    }
   }
 
   // Broadcast when a new community is created so lists update in real time

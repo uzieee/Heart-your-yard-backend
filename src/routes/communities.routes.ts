@@ -7,6 +7,7 @@ import {
   getCommunityById,
   getCommunityMembers,
   joinCommunity,
+  addCommunityMember,
   leaveCommunity,
   updateCommunity,
   deleteCommunity,
@@ -30,13 +31,14 @@ const communitiesRouter = Router();
 communitiesRouter.post("/", authenticateToken, createCommunity);
 communitiesRouter.get("/my/feed", authenticateToken, getCommunityFeed);
 communitiesRouter.get("/my", authenticateToken, getMyCommunities);
-communitiesRouter.get("/discover", getDiscoverCommunities);
+communitiesRouter.get("/discover", optionalAuth, getDiscoverCommunities);
 communitiesRouter.get("/feed", optionalAuth, getPublicCommunityFeed);
 communitiesRouter.get("/:communityId", optionalAuth, getCommunityById);
 communitiesRouter.get("/:communityId/members", getCommunityMembers);
 communitiesRouter.patch("/:communityId", authenticateToken, updateCommunity);
 communitiesRouter.delete("/:communityId", authenticateToken, deleteCommunity);
 communitiesRouter.post("/:communityId/join", authenticateToken, joinCommunity);
+communitiesRouter.post("/:communityId/members", authenticateToken, addCommunityMember);
 communitiesRouter.post("/:communityId/leave", authenticateToken, leaveCommunity);
 
 communitiesRouter.get("/:communityId/posts", authenticateToken, getCommunityPosts);

@@ -182,8 +182,10 @@ export const getPosts = async (
 
     const cursor = req.query.cursor as string | undefined;
     const limit = req.query.limit ? parseInt(req.query.limit as string) : 10;
+    const userId = req.query.userId as string | undefined; // optional: filter by author
+    const search = (req.query.search as string) || (req.query.tag as string) || undefined; // optional: search in description (e.g. "Search Posts by Tags")
 
-    const result = await getPostsService(req.user.userId, cursor, limit);
+    const result = await getPostsService(req.user.userId, cursor, limit, userId, search);
 
     sendSuccess(res, 200, "Posts fetched successfully", result);
   } catch (error: unknown) {

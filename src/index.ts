@@ -9,6 +9,7 @@ import { createServer } from "http";
 import { checkDBConnection } from "database";
 import router from "@/routes";
 import SocketService from "@/socket/socketServer";
+import { startPlantingTaskStatusWatcher } from "@/services/plantingTaskStatusWatcher";
 
 dotenv.config();
 const app = express();
@@ -57,9 +58,14 @@ export const socketService = new SocketService(httpServer);
 
 checkDBConnection()
   .then(() => {
+    const stopPlantingTaskStatusWatcher = startPlantingTaskStatusWatcher(socketService);
+    process.on("SIGINT", stopPlantingTaskStatusWatcher);
+    process.on("SIGTERM", stopPlantingTaskStatusWatcher);
+
     httpServer.listen(PORT, () => {
       console.log(`✅ Server is running at http://localhost:${PORT}`);
       console.log(`✅ Socket.io server initialized`);
+      console.log(`✅ Planting task status watcher started`);
     });
   })
   .catch((err) => {
